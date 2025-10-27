@@ -15,9 +15,8 @@ permissions:
 
 jobs:
   test:
-    runs-on:
-      - codebuild-github-actions-practice-${{ github.run_id }}-${{ github.run_attempt }}
-    environment: test
+    runs-on: ubuntu-latest
+    
     strategy:
       matrix:
         python-version: ["3.12", "3.13"]
@@ -26,16 +25,15 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        # Install the package in editable mode with dev dependencies
         pip install -e ".[dev]"
-        pip install build
+        pip install build twine
 
     - name: Lint with ruff
       run: |
@@ -43,64 +41,59 @@ jobs:
 
     - name: Test with pytest
       run: |
-        pytest -v --cov=file_encoder --cov-report=xml --cov-report=term-missing > pytest-output.txt 2>&1
-
-    - name: Build package
-      run: |
-        python -m build
-
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v4
-      if: matrix.python-version == '3.13' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
-
-    - name: Upload wheel to S3
-      if: matrix.python-version == '3.13' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-      run: |
-        for file in dist/*.whl; do
-          if [ -f "$file" ]; then
-            aws s3 cp "$file" s3://${{ secrets.AWS_S3_BUCKET }}/wheels/
-          fi
-        done
+        pytest -v --cov=file_encoder --cov-report=xml --cov-report=term-missing | tee pytest-output.txt
 
     - name: Upload test artifacts
       uses: actions/upload-artifact@v4
       if: matrix.python-version == '3.13'
       with:
-        name: test-results
+        name: test-results-python-${{ matrix.python-version }}
         path: |
           pytest-output.txt
           coverage.xml
         retention-days: 30
 
-    - name: Configure CodeArtifact
-      if: matrix.python-version == '3.13' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    - name: Build package
+      if: matrix.python-version == '3.13'
       run: |
-        # Install twine from PyPI first
-        pip install twine
+        python -m build
 
-        # Get CodeArtifact credentials
-        export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token --domain zabalytics --query authorizationToken --output text --region us-west-2)
-        export CODEARTIFACT_REPOSITORY_URL=$(aws codeartifact get-repository-endpoint --domain zabalytics --repository pypi --format pypi --query repositoryEndpoint --output text --region us-west-2)
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      if: matrix.python-version == '3.13'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
-        echo "CODEARTIFACT_AUTH_TOKEN=$CODEARTIFACT_AUTH_TOKEN" >> $GITHUB_ENV
-        echo "CODEARTIFACT_REPOSITORY_URL=$CODEARTIFACT_REPOSITORY_URL" >> $GITHUB_ENV
+    - name: Upload wheel to S3
+      if: matrix.python-version == '3.13'
+      run: |
+        for file in dist/*.whl; do
+          if [ -f "$file" ]; then
+            aws s3 cp "$file" s3://${{ secrets.S3_BUCKET_NAME }}/wheels/
+          fi
+        done
 
     - name: Publish to CodeArtifact
-      if: matrix.python-version == '3.13' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+      if: matrix.python-version == '3.13'
       run: |
-        # Delete existing package (ignore if it doesn't exist)
-        aws codeartifact delete-package-versions \
-          --domain zabalytics \
-          --repository pypi \
+        # Get CodeArtifact authentication token
+        export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact get-authorization-token \
+          --domain tiasmith-domain \
+          --query authorizationToken \
+          --output text \
+          --region us-west-2)
+        
+        # Get repository endpoint
+        export CODEARTIFACT_REPOSITORY_URL=$(aws codeartifact get-repository-endpoint \
+          --domain tiasmith-domain \
+          --repository github-actions-repo \
           --format pypi \
-          --package file-encoder \
-          --versions 0.1.0 \
-          --region us-west-2 || true
-
+          --query repositoryEndpoint \
+          --output text \
+          --region us-west-2)
+        
         # Upload the package
         twine upload --repository-url $CODEARTIFACT_REPOSITORY_URL \
           --username aws \
